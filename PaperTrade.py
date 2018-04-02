@@ -7,14 +7,12 @@
 # @Software: PyCharm
 
 import time
-import random
 from threading import Thread
 from ContractSamples import ContractSamples
 from datetime import timedelta
 import pandas as pd
 from pymongo import MongoClient
 from pymongo import (DESCENDING, ASCENDING)
-from ibapi.order import *
 from OrderSamples import OrderSamples
 
 
@@ -38,8 +36,15 @@ class PaperTrade(Thread):
             print("Executing requests ... finished")
 
     def paper_trade(self):
+        my_client = MongoClient('10.12.0.30', 27017)
+        my_db = my_client['research']
+        my_col = my_db['optionsonar']
+        data = my_col.find({}, {'_id': 0})
+        data_pd = pd.DataFrame(list(data))
+        start_num = len(data_pd)
         order_done = False
         while not self.client.process_done and not order_done:
+
             if self.client.nextValidOrderId is not None:
                 self.client.placeOrder(self.client.nextOrderId(), ContractSamples.OptionWithLocalSymbol('AAPL  180420C00180000'),
                                OrderSamples.LimitOrder("BUY", 3, 0.1))

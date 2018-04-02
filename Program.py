@@ -41,11 +41,7 @@ from OrderSamples import OrderSamples
 from AvailableAlgoParams import AvailableAlgoParams
 from ScannerSubscriptionSamples import ScannerSubscriptionSamples
 from FaAllocationSamples import FaAllocationSamples
-
-from pymongo import MongoClient
-from pymongo import (DESCENDING, ASCENDING)
 import PaperTrade
-import pandas as pd
 
 
 def SetupLogger():
