@@ -91,7 +91,7 @@ class ContractSamples:
     def Bond():
             #! [bond]
             contract = Contract()
-            contract.conId = 267433416
+            contract.conId = 29105549
             contract.exchange = "SMART"
             #! [bond]
             return contract
@@ -150,12 +150,15 @@ class ContractSamples:
 
             
     @staticmethod
-    def USStockAtSmart():
+    def USStockAtSmart(ticker:str):
         contract = Contract()
-        contract.symbol = "IBKR"
+#        contract.symbol = "IBKR"
+#         contract.symbol = "AAPL"
+        contract.symbol = ticker
         contract.secType = "STK"
         contract.currency = "USD"
         contract.exchange = "SMART"
+        # contract.primaryExchange = "NASDAQ"
         return contract
 
 
@@ -217,14 +220,20 @@ class ContractSamples:
     contract description """
 
     @staticmethod
-    def OptionWithLocalSymbol():
+    def OptionWithLocalSymbol(localsymbol:str):
         #! [optcontract_localsymbol]
         contract = Contract()
         #Watch out for the spaces within the local symbol!
-        contract.localSymbol = "C DBK  DEC 20  1600"
+        # contract.localSymbol = "C DBK  DEC 20  1600"
+        # contract.secType = "OPT"
+        # contract.exchange = "DTB"
+        # contract.currency = "EUR"
+
+        # contract.localSymbol = "AAPL  180420C00180000"
+        contract.localSymbol = localsymbol
         contract.secType = "OPT"
-        contract.exchange = "DTB"
-        contract.currency = "EUR"
+        contract.exchange = "SMART"
+        contract.currency = "USD"
         #! [optcontract_localsymbol]
         return contract
 
@@ -303,14 +312,14 @@ class ContractSamples:
     def FuturesOnOptions():
         #! [fopcontract]
         contract = Contract()
-        contract.symbol = "SPX"
+        contract.symbol = "ES"
         contract.secType = "FOP"
         contract.exchange = "GLOBEX"
         contract.currency = "USD"
-        contract.lastTradeDateOrContractMonth = "20180315"
-        contract.strike = 1025
+        contract.lastTradeDateOrContractMonth = "20160617"
+        contract.strike = 1810
         contract.right = "C"
-        contract.multiplier = "250"
+        contract.multiplier = "50"
         #! [fopcontract]
         return contract
 
@@ -352,13 +361,15 @@ class ContractSamples:
     from the TWS to prevent abuse. """
 
     @staticmethod
-    def OptionForQuery():
+    def OptionForQuery(symbol:str):
         #! [optionforquery]
         contract = Contract()
-        contract.symbol = "FISV"
+        # contract.symbol = "FISV"
+        contract.symbol = symbol
         contract.secType = "OPT"
         contract.exchange = "SMART"
         contract.currency = "USD"
+        # contract.localSymbol = "AAPL  180420C00180000"
         #! [optionforquery]
         return contract
 
@@ -558,48 +569,6 @@ class ContractSamples:
         contract.secType = "NEWS"
         contract.exchange = "MT" #Midnight Trader
         #! [newscontractmt]
-        return contract
-
-    @staticmethod
-    def ContFut():
-        #! [continuousfuturescontract]
-        contract = Contract()
-        contract.symbol = "ES"
-        contract.secType = "CONTFUT"
-        contract.exchange = "GLOBEX"
-        #! [continuousfuturescontract]
-        return contract
-
-    @staticmethod
-    def ContAndExpiringFut():
-        #! [contandexpiringfut]
-        contract = Contract()
-        contract.symbol = "ES"
-        contract.secType = "FUT+CONTFUT"
-        contract.exchange = "GLOBEX"
-        #! [contandexpiringfut]
-        return contract
-
-    @staticmethod
-    def JefferiesContract():
-        #! [jefferies_contract]
-        contract = Contract()
-        contract.symbol = "AAPL"
-        contract.secType = "STK"
-        contract.exchange = "JEFFALGO"
-        contract.currency = "USD"
-        #! [jefferies_contract]
-        return contract
-
-    @staticmethod
-    def CSFBContract():
-        #! [csfb_contract]
-        contract = Contract()
-        contract.symbol = "IBKR"
-        contract.secType = "STK"
-        contract.exchange = "CSFBALGO"
-        contract.currency = "USD"
-        #! [csfb_contract]
         return contract
 
 

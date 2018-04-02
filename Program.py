@@ -9,11 +9,15 @@ import argparse
 import datetime
 import collections
 import inspect
+import threading
+import pytz
+from tickdict import *
 
 import logging
 import time
 import os.path
 
+# from datetime import timedelta
 from ibapi import wrapper
 from ibapi.client import EClient
 from ibapi.utils import iswrapper
@@ -37,6 +41,17 @@ from OrderSamples import OrderSamples
 from AvailableAlgoParams import AvailableAlgoParams
 from ScannerSubscriptionSamples import ScannerSubscriptionSamples
 from FaAllocationSamples import FaAllocationSamples
+
+from stock_code_define import *
+from date_list import *
+from pymongo import MongoClient
+from pymongo import (DESCENDING, ASCENDING)
+import processer
+import pandas as pd
+
+# 连接线下数据库
+client = MongoClient('127.0.0.1', 27017)
+my_db = client.option_data_us_mins
 
 
 def SetupLogger():
@@ -180,11 +195,14 @@ class TestWrapper(wrapper.EWrapper):
 # this is here for documentation generation
 """
 #! [ereader]
-        # You don't need to run this in your code!
+        #this code is in Client::connect() so it's automatically done, no need
+        # for user to do it
         self.reader = reader.EReader(self.conn, self.msg_queue)
         self.reader.start()   # start thread
+
 #! [ereader]
 """
+
 
 # ! [socket_init]
 class TestApp(TestWrapper, TestClient):
@@ -199,6 +217,23 @@ class TestApp(TestWrapper, TestClient):
         self.reqId2nErr = collections.defaultdict(int)
         self.globalCancelOnly = False
         self.simplePlaceOid = None
+
+        self.tradeRecord = {'Time':None, 'Last_price':0, 'Last_size':0, 'Volume':0, 'Call_open_interest':0,
+                            'Put_open_interest':0, 'Option_call_volume':0, 'Option_put_volume':0}
+        self.columnsname = []
+        self.contract_data = []
+        self.tick_date = None
+        self.tick_reqId = None
+        self.tick_num = 1
+        self.process_done = False
+        self.option_code_map = []
+        self.opt_req_next_code = False
+        self.opt_req_continue = False
+        self.lasttime = None
+        self.order_id = 0
+        self.queryTime = ''
+        self.next_contract = None
+
 
     def dumpTestCoverageSituation(self):
         for clntMeth in sorted(self.clntMeth2callCount.keys()):
@@ -235,7 +270,7 @@ class TestApp(TestWrapper, TestClient):
         # ! [nextvalidid]
 
         # we can start now
-        self.start()
+#        self.start()
 
     def start(self):
         if self.started:
@@ -248,49 +283,44 @@ class TestApp(TestWrapper, TestClient):
             self.reqGlobalCancel()
         else:
             print("Executing requests")
-            #self.reqGlobalCancel()
-            #self.marketDataType_req()
-            #self.accountOperations_req()
-            #self.tickDataOperations_req()
-            #self.marketDepthOperations_req()
-            #self.realTimeBars_req()
-            #self.historicalDataRequests_req()
-            #self.optionsOperations_req()
-            #self.marketScanners_req()
-            #self.reutersFundamentals_req()
-            #self.bulletins_req()
-            #self.contractOperations_req()
-            #self.contractNewsFeed_req()
-            #self.miscelaneous_req()
-            #self.linkingOperations()
-            #self.financialAdvisorOperations()
-            #self.orderOperations_req()
-            #self.marketRuleOperations()
-            #self.pnlOperations()
-            #self.historicalTicksRequests_req()
-            self.tickByTickOperations()
+#            self.reqGlobalCancel()
+#            self.marketDataType_req()
+#            self.accountOperations_req()
+#            self.tickDataOperations_req()
+#            self.marketDepthOperations_req()
+#            self.realTimeBars_req()
+#             self.historicalDataRequests_req()
+#            self.optionsOperations_req()
+#            self.marketScanners_req()
+#            self.reutersFundamentals_req()
+#            self.bulletins_req()
+#            self.contractOperations_req()
+#            self.contractNewsFeed_req()
+#            self.miscelaneous_req()
+#            self.linkingOperations()
+#            self.financialAdvisorOperations()
+#            self.orderOperations_req()
             print("Executing requests ... finished")
 
     def keyboardInterrupt(self):
-        self.nKeybInt += 1
-        if self.nKeybInt == 1:
-            self.stop()
-        else:
-            print("Finishing test")
-            self.done = True
+        self.stop()
+        print("Finishing test")
+        self.done = True
+        self.process_done = True
+        print('self.done= '+ str(self.done))
 
     def stop(self):
         print("Executing cancels")
-        self.orderOperations_cancel()
-        self.accountOperations_cancel()
-        self.tickDataOperations_cancel()
-        self.marketDepthOperations_cancel()
-        self.realTimeBars_cancel()
-        self.historicalDataRequests_cancel()
-        self.optionsOperations_cancel()
-        self.marketScanners_cancel()
-        self.reutersFundamentals_cancel()
-        self.bulletins_cancel()
+#        self.orderOperations_cancel()
+#        self.accountOperations_cancel()
+#        self.tickDataOperations_cancel()
+#        self.marketDepthOperations_cancel()
+#        self.realTimeBars_cancel()
+#        self.historicalDataRequests_cancel()
+#        self.optionsOperations_cancel()
+#        self.marketScanners_cancel()
+#        self.reutersFundamentals_cancel()
+#        self.bulletins_cancel()
         print("Executing cancels ... finished")
 
     def nextOrderId(self):
@@ -303,6 +333,12 @@ class TestApp(TestWrapper, TestClient):
     def error(self, reqId: TickerId, errorCode: int, errorString: str):
         super().error(reqId, errorCode, errorString)
         print("Error. Id: ", reqId, " Code: ", errorCode, " Msg: ", errorString)
+
+        if len(errorString.split(':'))==3 and errorString.split(':')[1] == 'HMDS query returned no data':
+            fw = open('data_err.txt', 'a')
+            fw.write(str(reqId) + ', ' + self.queryTime + ', ' + errorString.split(':')[2] + '\n')
+            fw.close()
+            self.opt_req_next_code = True
 
     # ! [error] self.reqId2nErr[reqId] += 1
 
@@ -338,14 +374,13 @@ class TestApp(TestWrapper, TestClient):
     def orderStatus(self, orderId: OrderId, status: str, filled: float,
                     remaining: float, avgFillPrice: float, permId: int,
                     parentId: int, lastFillPrice: float, clientId: int,
-                    whyHeld: str, mktCapPrice: float):
+                    whyHeld: str):
         super().orderStatus(orderId, status, filled, remaining,
-                            avgFillPrice, permId, parentId, lastFillPrice, clientId, whyHeld, mktCapPrice)
-        print("OrderStatus. Id: ", orderId, ", Status: ", status, ", Filled: ", filled,
-              ", Remaining: ", remaining, ", AvgFillPrice: ", avgFillPrice,
-              ", PermId: ", permId, ", ParentId: ", parentId, ", LastFillPrice: ",
-              lastFillPrice, ", ClientId: ", clientId, ", WhyHeld: ",
-              whyHeld, ", MktCapPrice: ", mktCapPrice)
+                            avgFillPrice, permId, parentId, lastFillPrice, clientId, whyHeld)
+        print("OrderStatus. Id:", orderId, "Status:", status, "Filled:", filled,
+              "Remaining:", remaining, "AvgFillPrice:", avgFillPrice,
+              "PermId:", permId, "ParentId:", parentId, "LastFillPrice:",
+              lastFillPrice, "ClientId:", clientId, "WhyHeld:", whyHeld)
 
     # ! [orderstatus]
 
@@ -420,23 +455,6 @@ class TestApp(TestWrapper, TestClient):
         # ! [cancelpositionsmulti]
         self.cancelPositionsMulti(9006)
         # ! [cancelpositionsmulti]
-
-    def pnlOperations(self):
-        # ! [reqpnl]
-        self.reqPnL(17001, "DU242650", "")
-        # ! [reqpnl]
-        time.sleep(1)
-        # ! [cancelpnl]
-        self.cancelPnL(17001)
-        # ! [cancelpnl]
-
-        # ! [reqpnlsingle]
-        self.reqPnLSingle(17002, "DU242650", "", 265598);
-        # ! [reqpnlsingle]
-        time.sleep(1)
-        # ! [cancelpnlsingle]
-        self.cancelPnLSingle(17002);
-        # ! [cancelpnlsingle]
 
     @iswrapper
     # ! [managedaccounts]
@@ -589,24 +607,6 @@ class TestApp(TestWrapper, TestClient):
 
     # ! [familyCodes]
 
-    @iswrapper
-    # ! [pnl]
-    def pnl(self, reqId: int, dailyPnL: float,
-            unrealizedPnL: float, realizedPnL: float):
-        super().pnl(reqId, dailyPnL, unrealizedPnL, realizedPnL)
-        print("Daily PnL. Req Id: ", reqId, ", daily PnL: ", dailyPnL,
-              ", unrealizedPnL: ", unrealizedPnL, ", realizedPnL: ", realizedPnL)
-    # ! [pnl]
-
-    @iswrapper
-    # ! [pnlsingle]
-    def pnlSingle(self, reqId: int, pos: int, dailyPnL: float,
-                  unrealizedPnL: float, realizedPnL: float, value: float):
-        super().pnlSingle(reqId, pos, dailyPnL, unrealizedPnL, realizedPnL, value)
-        print("Daily PnL Single. Req Id: ", reqId, ", pos: ", pos,
-              ", daily PnL: ", dailyPnL, ", unrealizedPnL: ", unrealizedPnL,
-              ", realizedPnL: ", realizedPnL, ", value: ", value)
-    # ! [pnlsingle]
 
     def marketDataType_req(self):
         # ! [reqmarketdatatype]
@@ -638,7 +638,7 @@ class TestApp(TestWrapper, TestClient):
 
         # ! [regulatorysnapshot]
         # Each regulatory snapshot request incurs a 0.01 USD fee
-        self.reqMktData(1014, ContractSamples.USStock(), "", False, True, [])
+        # self.reqMktData(1014, ContractSamples.USStock(), "", False, True, [])
         # ! [regulatorysnapshot]
 
         # ! [reqmktdata_genticks]
@@ -656,14 +656,10 @@ class TestApp(TestWrapper, TestClient):
 
 
         # ! [reqmktdata_broadtapenews]
-        self.reqMktData(1009, ContractSamples.BTbroadtapeNewsFeed(),
-                        "mdoff,292", False, False, [])
-        self.reqMktData(1010, ContractSamples.BZbroadtapeNewsFeed(),
-                        "mdoff,292", False, False, [])
-        self.reqMktData(1011, ContractSamples.FLYbroadtapeNewsFeed(),
-                        "mdoff,292", False, False, [])
-        self.reqMktData(1012, ContractSamples.MTbroadtapeNewsFeed(),
-                        "mdoff,292", False, False, [])
+        self.reqMktData(1009, ContractSamples.BTbroadtapeNewsFeed(), "mdoff,292", False, False, [])
+        self.reqMktData(1010, ContractSamples.BZbroadtapeNewsFeed(), "mdoff,292", False, False, [])
+        self.reqMktData(1011, ContractSamples.FLYbroadtapeNewsFeed(), "mdoff,292", False, False, [])
+        self.reqMktData(1012, ContractSamples.MTbroadtapeNewsFeed(), "mdoff,292", False, False, [])
         # ! [reqmktdata_broadtapenews]
 
         # ! [reqoptiondatagenticks]
@@ -691,13 +687,12 @@ class TestApp(TestWrapper, TestClient):
     def tickPrice(self, reqId: TickerId, tickType: TickType, price: float,
                   attrib: TickAttrib):
         super().tickPrice(reqId, tickType, price, attrib)
-        print("Tick Price. Ticker Id:", reqId, "tickType:", tickType,
-              "Price:", price, "CanAutoExecute:", attrib.canAutoExecute,
-              "PastLimit:", attrib.pastLimit, end=' ')
-        if tickType == TickTypeEnum.BID or tickType == TickTypeEnum.ASK:
-            print("PreOpen:", attrib.preOpen)
-        else:
-            print()
+        print("Tick Price. Ticker Id:", reqId, "tickType:", TickTypeDict[tickType], "Price:",
+              price, "CanAutoExecute:", attrib.canAutoExecute,
+              "PastLimit", attrib.pastLimit)
+
+        if tickType == 4:
+            self.tradeRecord['Last_price'] = price
 
     # ! [tickprice]
 
@@ -706,8 +701,37 @@ class TestApp(TestWrapper, TestClient):
     # ! [ticksize]
     def tickSize(self, reqId: TickerId, tickType: TickType, size: int):
         super().tickSize(reqId, tickType, size)
-        print("Tick Size. Ticker Id:", reqId, "tickType:", tickType, "Size:", size)
+        print("Tick Size. Ticker Id:", reqId, "tickType:", TickTypeDict[tickType], "Size:", size)
 
+        if tickType == 8:
+            self.tradeRecord['Volume'] = size
+        if tickType == 27:
+            self.tradeRecord['Call_open_interest'] = size
+        if tickType == 28:
+            self.tradeRecord['Put_open_interest'] = size
+        if tickType == 29:
+            self.tradeRecord['Option_call_volume'] = size
+        if tickType == 30:
+            self.tradeRecord['Option_put_volume'] = size
+        if tickType == 5:
+            self.tradeRecord['Last_size'] = size
+            stock_code = stock_code_map[reqId]
+            Time = self.tradeRecord['Time']  # day 已下数据使用
+            update_time = datetime.datetime.now()
+            # date = datetime.datetime.strptime(bar.date, '%Y%m%d')              #day（含）以上数据使用
+
+            my_db[stock_code].ensure_index([('Time', ASCENDING), ('stock_code', ASCENDING)])
+            # 定义更新主键，若主键存在则更新，不存在则插入
+            update_key = {'Time': Time, 'stock_code': stock_code, 'update_time': update_time}
+            # 定义更新内容
+            update_item = {'Last_price': self.tradeRecord['Last_price'], 'Last_size': self.tradeRecord['Last_size'],
+                           'Volume':self.tradeRecord['Volume'], 'Call_open_interest': self.tradeRecord['Call_open_interest'],
+                           'Put_open_interest': self.tradeRecord['Put_open_interest'],
+                           'Option_call_volume': self.tradeRecord['Option_call_volume'],
+                           'Option_put_volume': self.tradeRecord['Option_put_volume'],
+                           'update_time': update_time , 'Time': Time, 'stock_code': stock_code}
+            # 执行更新操作
+            my_db[stock_code].update(update_key, {'$set': update_item}, upsert=True)
     # ! [ticksize]
 
 
@@ -715,7 +739,7 @@ class TestApp(TestWrapper, TestClient):
     # ! [tickgeneric]
     def tickGeneric(self, reqId: TickerId, tickType: TickType, value: float):
         super().tickGeneric(reqId, tickType, value)
-        print("Tick Generic. Ticker Id:", reqId, "tickType:", tickType, "Value:", value)
+        print("Tick Generic. Ticker Id:", reqId, "tickType:", TickTypeDict[tickType], "Value:", value)
 
     # ! [tickgeneric]
 
@@ -724,7 +748,11 @@ class TestApp(TestWrapper, TestClient):
     # ! [tickstring]
     def tickString(self, reqId: TickerId, tickType: TickType, value: str):
         super().tickString(reqId, tickType, value)
-        print("Tick string. Ticker Id:", reqId, "Type:", tickType, "Value:", value)
+        if tickType == 45:
+            value = datetime.datetime.fromtimestamp(float(value),pytz.timezone('US/Eastern'))
+            self.tradeRecord['Time'] = value
+            value = value.strftime("%Y-%m-%d %H:%M:%S")
+        print("Tick string. Ticker Id:", reqId, "Type:", TickTypeDict[tickType], "Value:", value)
 
     # ! [tickstring]
 
@@ -736,86 +764,6 @@ class TestApp(TestWrapper, TestClient):
         print("TickSnapshotEnd:", reqId)
 
     # ! [ticksnapshotend]
-
-    @iswrapper
-    # ! [rerouteMktDataReq]
-    def rerouteMktDataReq(self, reqId: int, conId: int, exchange: str):
-        super().rerouteMktDataReq(reqId, conId, exchange)
-        print("Re-route market data request. Req Id: ", reqId,
-              ", ConId: ", conId, " Exchange: ", exchange)
-
-    # ! [rerouteMktDataReq]
-
-    @iswrapper
-    # ! [marketRule]
-    def marketRule(self, marketRuleId: int, priceIncrements: ListOfPriceIncrements):
-        super().marketRule(marketRuleId, priceIncrements)
-        print("Market Rule ID: ", marketRuleId)
-        for priceIncrement in priceIncrements:
-            print("Price Increment. Low Edge: ", priceIncrement.lowEdge,
-                  ", Increment: ", priceIncrement.increment)
-    # ! [marketRule]
-
-    @printWhenExecuting
-    def tickByTickOperations(self):
-        # Requesting tick-by-tick data (only refresh)
-        # ! [reqtickbytick]
-        self.reqTickByTickData(19001, ContractSamples.USStockAtSmart(), "Last")
-        self.reqTickByTickData(19002, ContractSamples.USStockAtSmart(), "AllLast")
-        self.reqTickByTickData(19003, ContractSamples.USStockAtSmart(), "BidAsk")
-        self.reqTickByTickData(19004, ContractSamples.USStockAtSmart(), "MidPoint")
-        # ! [reqtickbytick]
-
-        time.sleep(1)
-
-        # ! [canceltickbytick]
-        self.cancelTickByTickData(19001)
-        self.cancelTickByTickData(19002)
-        self.cancelTickByTickData(19003)
-        self.cancelTickByTickData(19004)
-        # ! [canceltickbytick]
-
-    @iswrapper
-    def tickByTickAllLast(self, reqId: int, tickType: int, time: int, price: float,
-                          size: int, attribs: TickAttrib, exchange: str,
-                          specialConditions: str):
-        super().tickByTickAllLast(reqId, tickType, time, price, size, attribs,
-                                  exchange, specialConditions)
-        if tickType == 1:
-            print("Last.", end='')
-        else:
-            print("AllLast.", end='')
-        print(" ReqId: ", reqId,
-              " Time: ", datetime.datetime.fromtimestamp(time).strftime("%Y%m%d %H:%M:%S"),
-              " Price: ", price, " Size: ", size, " Exch: " , exchange,
-              "Spec Cond: ", specialConditions, end='')
-        if attribs.pastLimit:
-            print(" pastLimit ", end='')
-        if attribs.unreported:
-            print(" unreported", end='')
-        print()
-
-    @iswrapper
-    def tickByTickBidAsk(self, reqId: int, time: int, bidPrice: float, askPrice: float,
-                         bidSize: int, askSize: int, attribs: TickAttrib):
-        super().tickByTickBidAsk(reqId, time, bidPrice, askPrice, bidSize,
-                                 askSize, attribs)
-        print("BidAsk. Req Id: ", reqId,
-              " Time: ", datetime.datetime.fromtimestamp(time).strftime("%Y%m%d %H:%M:%S"),
-              " BidPrice: ", bidPrice, " AskPrice: ", askPrice, " BidSize: ", bidSize,
-              " AskSize: ", askSize, end='')
-        if attribs.bidPastLow:
-            print(" bidPastLow", end='')
-        if attribs.askPastHigh:
-            print(" askPastHigh", end='')
-        print()
-
-    @iswrapper
-    def tickByTickMidPoint(self, reqId: int, time: int, midPoint: float):
-        super().tickByTickMidPoint(reqId, time, midPoint)
-        print("Midpoint. Req Id: ", reqId,
-              " Time: ", datetime.datetime.fromtimestamp(time).strftime("%Y%m%d %H:%M:%S"),
-              " MidPoint: ", midPoint)
 
 
     @printWhenExecuting
@@ -854,13 +802,7 @@ class TestApp(TestWrapper, TestClient):
 
     # ! [updatemktdepthl2]
 
-    @iswrapper
-    # ! [rerouteMktDepthReq]
-    def rerouteMktDepthReq(self, reqId: int, conId: int, exchange: str):
-        super().rerouteMktDataReq(reqId, conId, exchange)
-        print("Re-route market data request. Req Id: ", reqId,
-              ", ConId: ", conId, " Exchange: ", exchange)
-    # ! [rerouteMktDepthReq]
+
 
     @printWhenExecuting
     def marketDepthOperations_cancel(self):
@@ -880,12 +822,9 @@ class TestApp(TestWrapper, TestClient):
 
     @iswrapper
     # ! [realtimebar]
-    def realtimeBar(self, reqId:TickerId, time:int, open:float, high:float,
-                    low:float, close:float, volume:int, wap:float, count:int):
+    def realtimeBar(self, reqId:TickerId, time:int, open:float, high:float, low:float, close:float, volume:int, wap:float, count:int):
         super().realtimeBar(reqId, time, open, high, low, close, volume, wap, count)
-        print("RealTimeBars. ", reqId, ": time ", time, ", open: ",open,
-              ", high: ", high, ", low: ", low, ", close: ", close, ", volume: ", volume,
-              ", wap: ", wap, ", count: ", count)
+        print("RealTimeBars. ", reqId, ": time ", time, ", open: ",open, ", high: ", high, ", low: ", low, ", close: ", close, ", volume: ", volume, ", wap: ", wap, ", count: ", count)
     # ! [realtimebar]
 
     @printWhenExecuting
@@ -896,36 +835,69 @@ class TestApp(TestWrapper, TestClient):
         self.cancelRealTimeBars(3001)
         # ! [cancelrealtimebars]
 
+
+
     @printWhenExecuting
     def historicalDataRequests_req(self):
         # Requesting historical data
         # ! [reqHeadTimeStamp]
-        self.reqHeadTimeStamp(4103, ContractSamples.USStockAtSmart(), "TRADES", 0, 1)
+        # for index in stock_code_map.keys():
+        #     print(self.done)
+        #     if self.done:
+        #         break
+        #     else:
+        #         stock_code = stock_code_map[index]
+        #         print('Start to get', stock_code, str(index))
+        #         self.reqHeadTimeStamp(index, ContractSamples.USStockAtSmart(stock_code), "TRADES", 0, 1)
+        #         time.sleep(10)
+        #         print('Finish query', stock_code)
+        #
+         print('request done')
+        # self.reqHeadTimeStamp(4103, ContractSamples.USStockAtSmart(), "TRADES", 0, 1)
         # ! [reqHeadTimeStamp]
 
-        time.sleep(1)
 
+        # time.sleep(1)
+        #
         # ! [cancelHeadTimestamp]
-        self.cancelHeadTimeStamp(4103)
+        # self.cancelHeadTimeStamp(4103)
         # ! [cancelHeadTimestamp]
 
         # ! [reqhistoricaldata]
-        queryTime = (datetime.datetime.today() -
-                     datetime.timedelta(days=180)).strftime("%Y%m%d %H:%M:%S")
-        self.reqHistoricalData(4101, ContractSamples.USStockAtSmart(), queryTime,
-                               "1 M", "1 day", "MIDPOINT", 1, 1, False, [])
-        self.reqHistoricalData(4001, ContractSamples.EurGbpFx(), queryTime,
-                               "1 M", "1 day", "MIDPOINT", 1, 1, False, [])
-        self.reqHistoricalData(4002, ContractSamples.EuropeanStock(), queryTime,
-                               "10 D", "1 min", "TRADES", 1, 1, False, [])
+        # queryTime = (datetime.datetime(2017,12,7,9,30,0,0) -
+        #              datetime.timedelta(days=1)).strftime("%Y%m%d %H:%M:%S")
+#        self.reqHistoricalData(4101, ContractSamples.USStockAtSmart(), queryTime,
+#                               "1 M", "1 day", "MIDPOINT", 1, 1, False, [])
+
+
+#       for queryTime in date_list:
+#           queryTime += timedelta(hours=16)
+#           for xx in range(13):
+#               for index in stock_code_map.keys():
+#                   stock_code = stock_code_map[index]
+#                   print('Start to get', stock_code, str(index), str(queryTime))
+#                   self.reqHistoricalData(index, ContractSamples.USStockAtSmart(stock_code), queryTime.strftime("%Y%m%d %H:%M:%S"),
+#                                          "1800 S", "1 secs", "TRADES", 1, 1, False, [])
+#                   time.sleep(20)
+#                   print('Finish query', stock_code+str(queryTime))
+#               print(xx)
+#               queryTime -= timedelta(seconds=1800)
+
+
+                # self.reqHistoricalData(4101, ContractSamples.USStockAtSmart('AAPL'), queryTime,
+            #                        "1800 S", "1 secs", "TRADES", 1, 1, False, [])
+        # self.reqHistoricalData(4001, ContractSamples.EurGbpFx(), queryTime,
+        #                        "1 M", "1 day", "MIDPOINT", 1, 1, False, [])
+        # self.reqHistoricalData(4002, ContractSamples.EuropeanStock(), queryTime,
+        #                        "10 D", "1 min", "TRADES", 1, 1, False, [])
         # ! [reqhistoricaldata]
 
         # ! [reqHistogramData]
-        self.reqHistogramData(4104, ContractSamples.USStock(), False, "3 days")
+        # self.reqHistogramData(4104, ContractSamples.USStock(), False, "3 days")
         # ! [reqHistogramData]
-        time.sleep(2)
+        # time.sleep(2)
         # ! [cancelHistogramData]
-        self.cancelHistogramData(4104)
+        # self.cancelHistogramData(4104)
         # ! [cancelHistogramData]
 
 
@@ -936,21 +908,20 @@ class TestApp(TestWrapper, TestClient):
         self.cancelHistoricalData(4001)
         self.cancelHistoricalData(4002)
 
-    @printWhenExecuting
-    def historicalTicksRequests_req(self):
-        # ! [reqhistoricalticks]
-        self.reqHistoricalTicks(18001, ContractSamples.USStockAtSmart(),
-                                "20170712 21:39:33", "", 10, "TRADES", 1, True, [])
-        self.reqHistoricalTicks(18002, ContractSamples.USStockAtSmart(),
-                                "20170712 21:39:33", "", 10, "BID_ASK", 1, True, [])
-        self.reqHistoricalTicks(18003, ContractSamples.USStockAtSmart(),
-                                "20170712 21:39:33", "", 10, "MIDPOINT", 1, True, [])
-        # ! [reqhistoricalticks]
-
     @iswrapper
     # ! [headTimestamp]
     def headTimestamp(self, reqId:int, headTimestamp:str):
         print("HeadTimestamp: ", reqId, " ", headTimestamp)
+        stock_code = stock_code_map[reqId]
+        # 检查是否存在些索引，如果不存在则创建，存在则返回None
+        my_db['HeadTimestamps'].create_index([('stock_code', ASCENDING)])
+        # 定义更新主键，若主键存在则更新，不存在则插入
+        update_key = {'stock_code': stock_code}
+        # 定义更新内容
+        update_item = {'stock_code': stock_code, 'headTimestamp': headTimestamp, 'update_time': datetime.datetime.now()}
+        # 执行更新操作
+        my_db['HeadTimestamps'].update_one(update_key, {'$set': update_item}, upsert=True)
+        
     # ! [headTimestamp]
 
     @iswrapper
@@ -965,6 +936,22 @@ class TestApp(TestWrapper, TestClient):
         print("HistoricalData. ", reqId, " Date:", bar.date, "Open:", bar.open,
               "High:", bar.high, "Low:", bar.low, "Close:", bar.close, "Volume:", bar.volume,
               "Count:", bar.barCount, "WAP:", bar.average)
+        index = reqId // 100000
+        option_code = self.option_code_map[index]
+        date = datetime.datetime.strptime(bar.date,'%Y%m%d %H:%M:%S')     #day 已下数据使用
+        # date = datetime.datetime.strptime(bar.date, '%Y%m%d')              #day（含）以上数据使用
+
+        stock_code = option_code.split()[0]
+
+        # 定义更新主键，若主键存在则更新，不存在则插入
+        update_key = {'date': date, 'option_code': option_code}
+        # 定义更新内容
+        update_item = {'option_code': option_code, 'date': date, 'Open': bar.open, 'High': bar.high, 'Low': bar.low,
+                       'Close': bar.close, 'Volume': bar.volume, 'Count': bar.barCount, 'WAP': bar.average,
+                       'update_time': datetime.datetime.now()}
+        # 执行更新操作
+        my_db[stock_code].update_one(update_key, {'$set': update_item}, upsert=True)
+
     # ! [historicaldata]
 
     @iswrapper
@@ -972,15 +959,16 @@ class TestApp(TestWrapper, TestClient):
     def historicalDataEnd(self, reqId: int, start: str, end: str):
         super().historicalDataEnd(reqId, start, end)
         print("HistoricalDataEnd ", reqId, "from", start, "to", end)
+        self.opt_req_next_code = True
     # ! [historicaldataend]
 
     @iswrapper
-    # ! [historicalDataUpdate]
+    #! [historicalDataUpdate]
     def historicalDataUpdate(self, reqId: int, bar: BarData):
         print("HistoricalDataUpdate. ", reqId, " Date:", bar.date, "Open:", bar.open,
               "High:", bar.high, "Low:", bar.low, "Close:", bar.close, "Volume:", bar.volume,
               "Count:", bar.barCount, "WAP:", bar.average)
-    # ! [historicalDataUpdate]
+    #! [historicalDataUpdate]
 
     @iswrapper
     # ! [historicalticks]
@@ -1004,15 +992,58 @@ class TestApp(TestWrapper, TestClient):
     # ! [historicaltickslast]
     def historicalTicksLast(self, reqId: int, ticks: ListOfHistoricalTickLast,
                             done: bool):
-        for tick in ticks:
-            print("Historical Tick Last. Req Id: ", reqId, ", time: ", tick.time,
-                  ", price: ", tick.price, ", size: ", tick.size, ", exchange: ", tick.exchange,
-                  ", special conditions:", tick.specialConditions)
+        print('start option tick test..........................')
+        if self.order_id < reqId:    #check if data is repeated
+            self.order_id = reqId
+            if ticks:
+                index = reqId//100000
+                time = datetime.datetime.fromtimestamp(float(ticks[0].time), pytz.timezone('US/Eastern'))
+                tick_date_now = time.year * 10000 + time.month * 100 + time.day
+                option_code = self.option_code_map[index]
+                stock_code = option_code.split()[0]
+                my_db[stock_code].create_index([('option_code', ASCENDING),('time', ASCENDING)])
+                for tick in ticks:
+                    timestamp = tick.time
+                    time = datetime.datetime.fromtimestamp(float(tick.time),pytz.timezone('US/Eastern'))
+                    tick_ID = tick_date_now*1000000 + self.tick_num
+                    time = time.strftime("%Y-%m-%d %H:%M:%S")
+                    print("Historical Tick Last. Req Id: ", reqId, ", option_code: ", option_code,
+                          ", tick_ID: ", tick_ID, ", time: ", time, ", timestamp: ", timestamp,
+                          ", price: ", tick.price, ", size: ", tick.size, ", exchange: ", tick.exchange,
+                          ", special conditions:", tick.specialConditions)
+
+                    time = datetime.datetime.strptime(time, "%Y-%m-%d %H:%M:%S")
+                    # 定义更新主键，若主键存在则更新，不存在则插入
+                    update_key = {'tick_ID': tick_ID, 'time': time, 'option_code': option_code}
+                    # 定义更新内容
+                    update_item = {'option_code': option_code, 'tick_ID': tick_ID, 'time': time, 'timestamp': timestamp,
+                                   'price': tick.price, 'size': tick.size,
+                                   'exchange': tick.exchange, 'special conditions': tick.specialConditions,
+                                   'update_time': datetime.datetime.now()}
+                    # 执行更新操作
+                    my_db[stock_code].update_one(update_key, {'$set': update_item}, upsert=True)
+                    self.tick_num += 1
+                print(len(ticks))
+                if len(ticks) < 1000:
+                    self.opt_req_next_time = True
+                    print(self.tick_num - 1)
+                    self.tick_num = 1
+                else:
+                    self.opt_req_continue = True
+                    self.lasttime = datetime.datetime.fromtimestamp(float(ticks[-1].time), pytz.timezone('US/Eastern'))
+                    n=-2
+                    while ticks[-1].time == ticks[n].time:
+                        n -= 1
+                    self.tick_num += (n + 1)
+            else:
+                self.opt_req_next_time = True
+                self.tick_num = 1
+                print(datetime.datetime.now())
     # ! [historicaltickslast]
 
     @printWhenExecuting
     def optionsOperations_req(self):
-        # ! [reqsecdefoptparams]
+        # ! [reqsecdefoptparams]R
         self.reqSecDefOptParams(0, "IBM", "", "STK", 8314)
         # ! [reqsecdefoptparams]
 
@@ -1084,7 +1115,6 @@ class TestApp(TestWrapper, TestClient):
         self.reqContractDetails(209, ContractSamples.EurGbpFx())
         self.reqContractDetails(210, ContractSamples.OptionForQuery())
         self.reqContractDetails(211, ContractSamples.Bond())
-        self.reqContractDetails(212, ContractSamples.FuturesOnOptions())
         # ! [reqcontractdetails]
 
         # ! [reqmatchingsymbols]
@@ -1104,30 +1134,26 @@ class TestApp(TestWrapper, TestClient):
 
         # Returns body of news article given article ID
         # ! [reqNewsArticle]
-        self.reqNewsArticle(214,"BZ", "BZ$04507322", [])
+        self.reqNewsArticle(214,"BZ", "BZ$04507322")
         # ! [reqNewsArticle]
 
         # Returns list of historical news headlines with IDs
         # ! [reqHistoricalNews]
-        self.reqHistoricalNews(215, 8314, "BZ+FLY", "", "", 10, [])
+        self.reqHistoricalNews(215, 8314, "BZ+FLY", "", "", 10)
         # ! [reqHistoricalNews]
 
     @iswrapper
     #! [tickNews]
-    def tickNews(self, tickerId: int, timeStamp: int, providerCode: str,
-                 articleId: str, headline: str, extraData: str):
-        print("tickNews: ", tickerId, ", timeStamp: ", timeStamp,
-              ", providerCode: ", providerCode, ", articleId: ", articleId,
-              ", headline: ", headline, "extraData: ", extraData)
+    def tickNews(self, tickerId: int, timeStamp: int, providerCode: str, articleId: str, headline: str, extraData: str):
+        print("tickNews: ", tickerId, ", timeStamp: ", timeStamp, ", providerCode: ", providerCode, ", articleId: ",
+              articleId, ", headline: ", headline, "extraData: ", extraData)
     #! [tickNews]
 
     @iswrapper
     #! [historicalNews]
-    def historicalNews(self, reqId: int, time: str, providerCode: str,
-                       articleId: str, headline: str):
-        print("historicalNews: ", reqId, ", time: ", time,
-              ", providerCode: ", providerCode, ", articleId: ", articleId,
-              ", headline: ", headline)
+    def historicalNews(self, reqId: int, time: str, providerCode: str, articleId: str, headline: str):
+        print("historicalNews: ", reqId, ", time: ", time, ", providerCode: ", providerCode, ", articleId: ",
+              articleId, ", headline: ", headline)
     #! [historicalNews]
 
     @iswrapper
@@ -1147,8 +1173,7 @@ class TestApp(TestWrapper, TestClient):
     @iswrapper
     #! [newsArticle]
     def newsArticle(self, reqId: int, articleType: int, articleText: str):
-        print("newsArticle: ", reqId, ", articleType: ", articleType,
-              ", articleText: ", articleText)
+        print("newsArticle: ", reqId, ", articleType: ", articleType, ", articleText: ", articleText)
     #! [newsArticle]
 
     @iswrapper
@@ -1156,6 +1181,13 @@ class TestApp(TestWrapper, TestClient):
     def contractDetails(self, reqId: int, contractDetails: ContractDetails):
         super().contractDetails(reqId, contractDetails)
         printinstance(contractDetails.summary)
+        # attrs = vars(contractDetails.summary)
+        # temp = []
+        # if not self.columnsname:
+        #     self.columnsname = [key for key in attrs.keys()]
+        # temp = [value for value in attrs.values()]
+        # self.contract_data.append(temp)
+        self.option_code_map.append(contractDetails.summary.localSymbol)
 
     # ! [contractdetails]
 
@@ -1172,6 +1204,16 @@ class TestApp(TestWrapper, TestClient):
     def contractDetailsEnd(self, reqId: int):
         super().contractDetailsEnd(reqId)
         print("ContractDetailsEnd. ", reqId, "\n")
+        print(len(self.option_code_map))
+        self.next_contract = True
+        if reqId == stock_code_max_index:
+            option_map = pd.DataFrame(self.option_code_map,columns=['option_code'])
+            option_map.to_csv('option_code_map.csv',index=False)
+
+        # contract_pd = pd.DataFrame(self.contract_data, columns=self.columnsname)
+        # contract_pd.to_csv('contract_details.csv')
+        # print(self.contract_data)
+        # print(self.columnsname)
 
     # ! [contractdetailsend]
 
@@ -1188,8 +1230,7 @@ class TestApp(TestWrapper, TestClient):
             for derivSecType in contractDescription.derivativeSecTypes:
                 derivSecTypes += derivSecType
                 derivSecTypes += " "
-            print("Contract: conId:%s, symbol:%s, secType:%s primExchange:%s, "
-                  "currency:%s, derivativeSecTypes:%s" % (
+            print("Contract: conId:%s, symbol:%s, secType:%s primExchange:%s, currency:%s, derivativeSecTypes:%s" % (
                 contractDescription.contract.conId,
                 contractDescription.contract.symbol,
                 contractDescription.contract.secType,
@@ -1235,8 +1276,7 @@ class TestApp(TestWrapper, TestClient):
         super().scannerData(reqId, rank, contractDetails, distance, benchmark,
                             projection, legsStr)
         print("ScannerData. ", reqId, "Rank:", rank, "Symbol:", contractDetails.summary.symbol,
-              "SecType:", contractDetails.summary.secType,
-              "Currency:", contractDetails.summary.currency,
+              "SecType:", contractDetails.summary.secType, "Currency:", contractDetails.summary.currency,
               "Distance:", distance, "Benchmark:", benchmark,
               "Projection:", projection, "Legs String:", legsStr)
 
@@ -1256,17 +1296,14 @@ class TestApp(TestWrapper, TestClient):
         super().smartComponents(reqId, map)
         print("smartComponents: ")
         for exch in map:
-            print(exch.bitNumber, ", Exchange Name: ", exch.exchange,
-                  ", Letter: ", exch.exchangeLetter)
+            print(exch.bitNumber, ", Exchange Name: ", exch.exchange, ", Letter: ", exch.exchangeLetter)
     # ! [smartcomponents]
 
     @iswrapper
     # ! [tickReqParams]
-    def tickReqParams(self, tickerId:int, minTick:float,
-                      bboExchange:str, snapshotPermissions:int):
+    def tickReqParams(self, tickerId:int, minTick:float, bboExchange:str, snapshotPermissions:int):
         super().tickReqParams(tickerId, minTick, bboExchange, snapshotPermissions)
-        print("tickReqParams: ", tickerId, " minTick: ", minTick,
-              " bboExchange: ", bboExchange, " snapshotPermissions: ", snapshotPermissions)
+        print("tickReqParams: ", tickerId, " minTick: ", minTick, " bboExchange: ", bboExchange, " snapshotPermissions: ", snapshotPermissions)
     # ! [tickReqParams]
 
     @iswrapper
@@ -1475,22 +1512,6 @@ class TestApp(TestWrapper, TestClient):
         self.placeOrder(self.nextOrderId(), ContractSamples.USStockAtSmart(), baseOrder)
         # ! [pctvoltm]
 
-        # ! [jeff_vwap_algo]
-        AvailableAlgoParams.FillJefferiesVWAPParams(baseOrder,
-                                                    "10:00:00 EST", "16:00:00 EST", 10, 10, "Exclude_Both",
-                                                    130, 135, 1, 10, "Patience", False, "Midpoint")
-
-        self.placeOrder(self.nextOrderId(), ContractSamples.JefferiesContract(), baseOrder)
-        # ! [jeff_vwap_algo]
-
-        # ! [csfb_inline_algo]
-        AvailableAlgoParams.FillCSFBInlineParams(baseOrder,
-                                                 "10:00:00 EST", "16:00:00 EST", "Patient",
-                                                 10, 20, 100, "Default", False, 40, 100, 100, 35)
-
-        self.placeOrder(self.nextOrderId(), ContractSamples.CSFBContract(), baseOrder)
-        # ! [csfb_inline_algo]
-
     @printWhenExecuting
     def financialAdvisorOperations(self):
         # Requesting FA information ***/
@@ -1654,13 +1675,6 @@ class TestApp(TestWrapper, TestClient):
         self.placeOrder(self.nextOrderId(), ContractSamples.EuropeanStock(), faOrderProfile)
         # ! [faorderprofile]
 
-        # ! [modelorder]
-        modelOrder = OrderSamples.LimitOrder("BUY", 200, 100)
-        modelOrder.account = "DF12345"
-        modelOrder.modelCode = "Technology" # model for tech stocks first created in TWS
-        self.placeOrder(self.nextOrderId(), ContractSamples.USStock(), modelOrder)
-        # ! [modelorder]
-
         self.placeOrder(self.nextOrderId(), ContractSamples.OptionAtBOX(),
                         OrderSamples.Block("BUY", 50, 20))
         self.placeOrder(self.nextOrderId(), ContractSamples.OptionAtBOX(),
@@ -1745,7 +1759,7 @@ class TestApp(TestWrapper, TestClient):
 
         # Cancel all orders for all accounts ***/
         # ! [reqglobalcancel]
-        self.reqGlobalCancel()
+        # self.reqGlobalCancel()
         # ! [reqglobalcancel]
 
         # Request the day's executions ***/
@@ -1759,23 +1773,12 @@ class TestApp(TestWrapper, TestClient):
             self.cancelOrder(self.simplePlaceOid)
             # ! [cancelorder]
 
-    def marketRuleOperations(self):
-        self.reqContractDetails(17001, ContractSamples.USStock())
-        self.reqContractDetails(17002, ContractSamples.Bond())
-		
-        time.sleep(1)
-
-        # ! [reqmarketrule]
-        self.reqMarketRule(26)
-        self.reqMarketRule(240)
-        # ! [reqmarketrule]
-
     @iswrapper
     # ! [execdetails]
     def execDetails(self, reqId: int, contract: Contract, execution: Execution):
         super().execDetails(reqId, contract, execution)
         print("ExecDetails. ", reqId, contract.symbol, contract.secType, contract.currency,
-              execution.execId, execution.orderId, execution.shares, execution.lastLiquidity)
+              execution.execId, execution.orderId, execution.shares)
 
     # ! [execdetails]
 
@@ -1799,15 +1802,20 @@ class TestApp(TestWrapper, TestClient):
 
 
 def main():
+    # 连接线下数据库
+    # client = MongoClient('10.12.0.30', 27017)
+    # client = MongoClient('127.0.0.1', 27017)
+
     SetupLogger()
     logging.debug("now is %s", datetime.datetime.now())
     logging.getLogger().setLevel(logging.ERROR)
+    #logging.getLogger().setLevel(logging.DEBUG)
 
     cmdLineParser = argparse.ArgumentParser("api tests")
     # cmdLineParser.add_option("-c", action="store_True", dest="use_cache", default = False, help = "use the cache")
     # cmdLineParser.add_option("-f", action="store", type="string", dest="file", default="", help="the input file")
     cmdLineParser.add_argument("-p", "--port", action="store", type=int,
-                               dest="port", default=7497, help="The TCP port to use")
+                               dest="port", default=7496, help="The TCP port to use")
     cmdLineParser.add_argument("-C", "--global-cancel", action="store_true",
                                dest="global_cancel", default=False,
                                help="whether to trigger a globalCancel req")
@@ -1848,19 +1856,25 @@ def main():
             app.globalCancelOnly = True
         # ! [connect]
         app.connect("127.0.0.1", args.port, clientId=0)
-        # ! [connect]
         print("serverVersion:%s connectionTime:%s" % (app.serverVersion(),
                                                       app.twsConnectionTime()))
-
-        # ! [clientrun]
+        # ! [connect]
+        # app.run()
+        print('starting ....................................')
+        my_proc = processer.Processer(app)
+        my_proc.start()
+#        while not app.done:
+#            print('Waiting to done .........................')
+#            time.sleep(1)
         app.run()
-        # ! [clientrun]
+        my_proc.join()
+        print('The end!!!!!!!!!!!')
+
     except:
         raise
     finally:
         app.dumpTestCoverageSituation()
         app.dumpReqAnsErrSituation()
-
 
 if __name__ == "__main__":
     main()
