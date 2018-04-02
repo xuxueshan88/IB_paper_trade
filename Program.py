@@ -42,16 +42,10 @@ from AvailableAlgoParams import AvailableAlgoParams
 from ScannerSubscriptionSamples import ScannerSubscriptionSamples
 from FaAllocationSamples import FaAllocationSamples
 
-from stock_code_define import *
-from date_list import *
 from pymongo import MongoClient
 from pymongo import (DESCENDING, ASCENDING)
-import processer
+import PaperTrade
 import pandas as pd
-
-# 连接线下数据库
-client = MongoClient('127.0.0.1', 27017)
-my_db = client.option_data_us_mins
 
 
 def SetupLogger():
@@ -268,6 +262,7 @@ class TestApp(TestWrapper, TestClient):
         logging.debug("setting nextValidOrderId: %d", orderId)
         self.nextValidOrderId = orderId
         # ! [nextvalidid]
+        print('nextvalidorderid is ', orderId)
 
         # we can start now
 #        self.start()
@@ -334,11 +329,6 @@ class TestApp(TestWrapper, TestClient):
         super().error(reqId, errorCode, errorString)
         print("Error. Id: ", reqId, " Code: ", errorCode, " Msg: ", errorString)
 
-        if len(errorString.split(':'))==3 and errorString.split(':')[1] == 'HMDS query returned no data':
-            fw = open('data_err.txt', 'a')
-            fw.write(str(reqId) + ', ' + self.queryTime + ', ' + errorString.split(':')[2] + '\n')
-            fw.close()
-            self.opt_req_next_code = True
 
     # ! [error] self.reqId2nErr[reqId] += 1
 
@@ -374,13 +364,14 @@ class TestApp(TestWrapper, TestClient):
     def orderStatus(self, orderId: OrderId, status: str, filled: float,
                     remaining: float, avgFillPrice: float, permId: int,
                     parentId: int, lastFillPrice: float, clientId: int,
-                    whyHeld: str):
+                    whyHeld: str, mktCapPrice: float):
         super().orderStatus(orderId, status, filled, remaining,
-                            avgFillPrice, permId, parentId, lastFillPrice, clientId, whyHeld)
-        print("OrderStatus. Id:", orderId, "Status:", status, "Filled:", filled,
-              "Remaining:", remaining, "AvgFillPrice:", avgFillPrice,
-              "PermId:", permId, "ParentId:", parentId, "LastFillPrice:",
-              lastFillPrice, "ClientId:", clientId, "WhyHeld:", whyHeld)
+                            avgFillPrice, permId, parentId, lastFillPrice, clientId, whyHeld, mktCapPrice)
+        print("OrderStatus. Id: ", orderId, ", Status: ", status, ", Filled: ", filled,
+              ", Remaining: ", remaining, ", AvgFillPrice: ", avgFillPrice,
+              ", PermId: ", permId, ", ParentId: ", parentId, ", LastFillPrice: ",
+              lastFillPrice, ", ClientId: ", clientId, ", WhyHeld: ",
+              whyHeld, ", MktCapPrice: ", mktCapPrice)
 
     # ! [orderstatus]
 
@@ -703,35 +694,6 @@ class TestApp(TestWrapper, TestClient):
         super().tickSize(reqId, tickType, size)
         print("Tick Size. Ticker Id:", reqId, "tickType:", TickTypeDict[tickType], "Size:", size)
 
-        if tickType == 8:
-            self.tradeRecord['Volume'] = size
-        if tickType == 27:
-            self.tradeRecord['Call_open_interest'] = size
-        if tickType == 28:
-            self.tradeRecord['Put_open_interest'] = size
-        if tickType == 29:
-            self.tradeRecord['Option_call_volume'] = size
-        if tickType == 30:
-            self.tradeRecord['Option_put_volume'] = size
-        if tickType == 5:
-            self.tradeRecord['Last_size'] = size
-            stock_code = stock_code_map[reqId]
-            Time = self.tradeRecord['Time']  # day 已下数据使用
-            update_time = datetime.datetime.now()
-            # date = datetime.datetime.strptime(bar.date, '%Y%m%d')              #day（含）以上数据使用
-
-            my_db[stock_code].ensure_index([('Time', ASCENDING), ('stock_code', ASCENDING)])
-            # 定义更新主键，若主键存在则更新，不存在则插入
-            update_key = {'Time': Time, 'stock_code': stock_code, 'update_time': update_time}
-            # 定义更新内容
-            update_item = {'Last_price': self.tradeRecord['Last_price'], 'Last_size': self.tradeRecord['Last_size'],
-                           'Volume':self.tradeRecord['Volume'], 'Call_open_interest': self.tradeRecord['Call_open_interest'],
-                           'Put_open_interest': self.tradeRecord['Put_open_interest'],
-                           'Option_call_volume': self.tradeRecord['Option_call_volume'],
-                           'Option_put_volume': self.tradeRecord['Option_put_volume'],
-                           'update_time': update_time , 'Time': Time, 'stock_code': stock_code}
-            # 执行更新操作
-            my_db[stock_code].update(update_key, {'$set': update_item}, upsert=True)
     # ! [ticksize]
 
 
@@ -836,69 +798,11 @@ class TestApp(TestWrapper, TestClient):
         # ! [cancelrealtimebars]
 
 
-
     @printWhenExecuting
     def historicalDataRequests_req(self):
-        # Requesting historical data
-        # ! [reqHeadTimeStamp]
-        # for index in stock_code_map.keys():
-        #     print(self.done)
-        #     if self.done:
-        #         break
-        #     else:
-        #         stock_code = stock_code_map[index]
-        #         print('Start to get', stock_code, str(index))
-        #         self.reqHeadTimeStamp(index, ContractSamples.USStockAtSmart(stock_code), "TRADES", 0, 1)
-        #         time.sleep(10)
-        #         print('Finish query', stock_code)
-        #
          print('request done')
         # self.reqHeadTimeStamp(4103, ContractSamples.USStockAtSmart(), "TRADES", 0, 1)
         # ! [reqHeadTimeStamp]
-
-
-        # time.sleep(1)
-        #
-        # ! [cancelHeadTimestamp]
-        # self.cancelHeadTimeStamp(4103)
-        # ! [cancelHeadTimestamp]
-
-        # ! [reqhistoricaldata]
-        # queryTime = (datetime.datetime(2017,12,7,9,30,0,0) -
-        #              datetime.timedelta(days=1)).strftime("%Y%m%d %H:%M:%S")
-#        self.reqHistoricalData(4101, ContractSamples.USStockAtSmart(), queryTime,
-#                               "1 M", "1 day", "MIDPOINT", 1, 1, False, [])
-
-
-#       for queryTime in date_list:
-#           queryTime += timedelta(hours=16)
-#           for xx in range(13):
-#               for index in stock_code_map.keys():
-#                   stock_code = stock_code_map[index]
-#                   print('Start to get', stock_code, str(index), str(queryTime))
-#                   self.reqHistoricalData(index, ContractSamples.USStockAtSmart(stock_code), queryTime.strftime("%Y%m%d %H:%M:%S"),
-#                                          "1800 S", "1 secs", "TRADES", 1, 1, False, [])
-#                   time.sleep(20)
-#                   print('Finish query', stock_code+str(queryTime))
-#               print(xx)
-#               queryTime -= timedelta(seconds=1800)
-
-
-                # self.reqHistoricalData(4101, ContractSamples.USStockAtSmart('AAPL'), queryTime,
-            #                        "1800 S", "1 secs", "TRADES", 1, 1, False, [])
-        # self.reqHistoricalData(4001, ContractSamples.EurGbpFx(), queryTime,
-        #                        "1 M", "1 day", "MIDPOINT", 1, 1, False, [])
-        # self.reqHistoricalData(4002, ContractSamples.EuropeanStock(), queryTime,
-        #                        "10 D", "1 min", "TRADES", 1, 1, False, [])
-        # ! [reqhistoricaldata]
-
-        # ! [reqHistogramData]
-        # self.reqHistogramData(4104, ContractSamples.USStock(), False, "3 days")
-        # ! [reqHistogramData]
-        # time.sleep(2)
-        # ! [cancelHistogramData]
-        # self.cancelHistogramData(4104)
-        # ! [cancelHistogramData]
 
 
     @printWhenExecuting
@@ -912,15 +816,6 @@ class TestApp(TestWrapper, TestClient):
     # ! [headTimestamp]
     def headTimestamp(self, reqId:int, headTimestamp:str):
         print("HeadTimestamp: ", reqId, " ", headTimestamp)
-        stock_code = stock_code_map[reqId]
-        # 检查是否存在些索引，如果不存在则创建，存在则返回None
-        my_db['HeadTimestamps'].create_index([('stock_code', ASCENDING)])
-        # 定义更新主键，若主键存在则更新，不存在则插入
-        update_key = {'stock_code': stock_code}
-        # 定义更新内容
-        update_item = {'stock_code': stock_code, 'headTimestamp': headTimestamp, 'update_time': datetime.datetime.now()}
-        # 执行更新操作
-        my_db['HeadTimestamps'].update_one(update_key, {'$set': update_item}, upsert=True)
         
     # ! [headTimestamp]
 
@@ -936,21 +831,6 @@ class TestApp(TestWrapper, TestClient):
         print("HistoricalData. ", reqId, " Date:", bar.date, "Open:", bar.open,
               "High:", bar.high, "Low:", bar.low, "Close:", bar.close, "Volume:", bar.volume,
               "Count:", bar.barCount, "WAP:", bar.average)
-        index = reqId // 100000
-        option_code = self.option_code_map[index]
-        date = datetime.datetime.strptime(bar.date,'%Y%m%d %H:%M:%S')     #day 已下数据使用
-        # date = datetime.datetime.strptime(bar.date, '%Y%m%d')              #day（含）以上数据使用
-
-        stock_code = option_code.split()[0]
-
-        # 定义更新主键，若主键存在则更新，不存在则插入
-        update_key = {'date': date, 'option_code': option_code}
-        # 定义更新内容
-        update_item = {'option_code': option_code, 'date': date, 'Open': bar.open, 'High': bar.high, 'Low': bar.low,
-                       'Close': bar.close, 'Volume': bar.volume, 'Count': bar.barCount, 'WAP': bar.average,
-                       'update_time': datetime.datetime.now()}
-        # 执行更新操作
-        my_db[stock_code].update_one(update_key, {'$set': update_item}, upsert=True)
 
     # ! [historicaldata]
 
@@ -992,53 +872,11 @@ class TestApp(TestWrapper, TestClient):
     # ! [historicaltickslast]
     def historicalTicksLast(self, reqId: int, ticks: ListOfHistoricalTickLast,
                             done: bool):
-        print('start option tick test..........................')
-        if self.order_id < reqId:    #check if data is repeated
-            self.order_id = reqId
-            if ticks:
-                index = reqId//100000
-                time = datetime.datetime.fromtimestamp(float(ticks[0].time), pytz.timezone('US/Eastern'))
-                tick_date_now = time.year * 10000 + time.month * 100 + time.day
-                option_code = self.option_code_map[index]
-                stock_code = option_code.split()[0]
-                my_db[stock_code].create_index([('option_code', ASCENDING),('time', ASCENDING)])
-                for tick in ticks:
-                    timestamp = tick.time
-                    time = datetime.datetime.fromtimestamp(float(tick.time),pytz.timezone('US/Eastern'))
-                    tick_ID = tick_date_now*1000000 + self.tick_num
-                    time = time.strftime("%Y-%m-%d %H:%M:%S")
-                    print("Historical Tick Last. Req Id: ", reqId, ", option_code: ", option_code,
-                          ", tick_ID: ", tick_ID, ", time: ", time, ", timestamp: ", timestamp,
-                          ", price: ", tick.price, ", size: ", tick.size, ", exchange: ", tick.exchange,
-                          ", special conditions:", tick.specialConditions)
+        for tick in ticks:
+            print("Historical Tick Last. Req Id: ", reqId, ", time: ", tick.time,
+                  ", price: ", tick.price, ", size: ", tick.size, ", exchange: ", tick.exchange,
+                  ", special conditions:", tick.specialConditions)
 
-                    time = datetime.datetime.strptime(time, "%Y-%m-%d %H:%M:%S")
-                    # 定义更新主键，若主键存在则更新，不存在则插入
-                    update_key = {'tick_ID': tick_ID, 'time': time, 'option_code': option_code}
-                    # 定义更新内容
-                    update_item = {'option_code': option_code, 'tick_ID': tick_ID, 'time': time, 'timestamp': timestamp,
-                                   'price': tick.price, 'size': tick.size,
-                                   'exchange': tick.exchange, 'special conditions': tick.specialConditions,
-                                   'update_time': datetime.datetime.now()}
-                    # 执行更新操作
-                    my_db[stock_code].update_one(update_key, {'$set': update_item}, upsert=True)
-                    self.tick_num += 1
-                print(len(ticks))
-                if len(ticks) < 1000:
-                    self.opt_req_next_time = True
-                    print(self.tick_num - 1)
-                    self.tick_num = 1
-                else:
-                    self.opt_req_continue = True
-                    self.lasttime = datetime.datetime.fromtimestamp(float(ticks[-1].time), pytz.timezone('US/Eastern'))
-                    n=-2
-                    while ticks[-1].time == ticks[n].time:
-                        n -= 1
-                    self.tick_num += (n + 1)
-            else:
-                self.opt_req_next_time = True
-                self.tick_num = 1
-                print(datetime.datetime.now())
     # ! [historicaltickslast]
 
     @printWhenExecuting
@@ -1204,24 +1042,14 @@ class TestApp(TestWrapper, TestClient):
     def contractDetailsEnd(self, reqId: int):
         super().contractDetailsEnd(reqId)
         print("ContractDetailsEnd. ", reqId, "\n")
-        print(len(self.option_code_map))
-        self.next_contract = True
-        if reqId == stock_code_max_index:
-            option_map = pd.DataFrame(self.option_code_map,columns=['option_code'])
-            option_map.to_csv('option_code_map.csv',index=False)
 
-        # contract_pd = pd.DataFrame(self.contract_data, columns=self.columnsname)
-        # contract_pd.to_csv('contract_details.csv')
-        # print(self.contract_data)
-        # print(self.columnsname)
 
     # ! [contractdetailsend]
 
 
     @iswrapper
     # ! [symbolSamples]
-    def symbolSamples(self, reqId: int,
-                      contractDescriptions: ListOfContractDescription):
+    def symbolSamples(self, reqId: int,                      contractDescriptions: ListOfContractDescription):
         super().symbolSamples(reqId, contractDescriptions)
         print("Symbol Samples. Request Id: ", reqId)
 
@@ -1807,15 +1635,15 @@ def main():
     # client = MongoClient('127.0.0.1', 27017)
 
     SetupLogger()
+#    logging.getLogger().setLevel(logging.ERROR)
+    logging.getLogger().setLevel(logging.DEBUG)
     logging.debug("now is %s", datetime.datetime.now())
-    logging.getLogger().setLevel(logging.ERROR)
-    #logging.getLogger().setLevel(logging.DEBUG)
 
     cmdLineParser = argparse.ArgumentParser("api tests")
     # cmdLineParser.add_option("-c", action="store_True", dest="use_cache", default = False, help = "use the cache")
     # cmdLineParser.add_option("-f", action="store", type="string", dest="file", default="", help="the input file")
     cmdLineParser.add_argument("-p", "--port", action="store", type=int,
-                               dest="port", default=7496, help="The TCP port to use")
+                               dest="port", default=7497, help="The TCP port to use")
     cmdLineParser.add_argument("-C", "--global-cancel", action="store_true",
                                dest="global_cancel", default=False,
                                help="whether to trigger a globalCancel req")
@@ -1855,13 +1683,13 @@ def main():
         if args.global_cancel:
             app.globalCancelOnly = True
         # ! [connect]
-        app.connect("127.0.0.1", args.port, clientId=0)
+        app.connect("127.0.0.1", args.port, clientId=1)
         print("serverVersion:%s connectionTime:%s" % (app.serverVersion(),
                                                       app.twsConnectionTime()))
         # ! [connect]
         # app.run()
         print('starting ....................................')
-        my_proc = processer.Processer(app)
+        my_proc = PaperTrade.PaperTrade(app)
         my_proc.start()
 #        while not app.done:
 #            print('Waiting to done .........................')
